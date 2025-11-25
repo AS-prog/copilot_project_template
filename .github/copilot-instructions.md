@@ -1,137 +1,76 @@
 ---
-description: 'Instructions for Azure Databricks, Databricks Connect, and DABs development'
+description: 'Master Instructions: Project Architecture, Local Dev (Connect), and Orchestration'
 applyTo: '**/*.py, **/*.yml, **/*.toml'
 ---
 
-# Azure Databricks & Python Local Development Instructions
+# Master Project Instructions: API Test (Local & DABs)
 
-## 1. Persona & Role
-Act as a Senior Data Engineer specializing in **Azure Databricks** and **Local Python Development**. Your priority is writing production-grade, modular code that runs locally via **Databricks Connect** and deploys via **Databricks Asset Bundles (DABs)**.
+## 1. Domain-Specific Standards (Orchestration)
+Before generating code, verify the file type and apply the specific rules from these reference files:
+- **Python Logic:** Follow rules in `.github/python.instructions.md` (Type hinting, logging, error handling).
+- **SQL & Delta:** Follow rules in `.github/databricks-sql.instructions.md` (ANSI, CTEs, Optimization).
+- **Commits:** Follow rules in `.github/conventional-commits.instructions.md` (Conventional Commits in Spanish).
+- **PRs:** Follow rules in `.github/copilot-pull-request-description-instructions.md`.
 
-## 2. Tech Stack & Context
-- **Language:** Python 3.11+ (Strict typing).
-- **Frameworks:** PySpark (3.4+), Pydantic V2, Databricks Connect 15.4+.
-- **Project Structure:** Local Python package layout (`src/<package_name>`).
-- **Infrastructure:** Azure Data Lake Storage Gen2 (ADLS), Delta Lake.
-- **Deployment:** Databricks Asset Bundles (`databricks.yml`).
-- **Package Management:** `uv` or `pip` with `pyproject.toml`.
-
-## 3. Critical Coding Rules
-
-### Local Development & Databricks Connect
-- **Spark Session:** Always initialize Spark using `DatabricksSession` to support remote execution.
-- **No Notebook Magics:** DO NOT use `%sql`, `%run`, or `dbutils.widgets` in Python source files. Use standard Python imports and `argparse` or `pydantic-settings`.
-- **Environment Variables:** Use `python-dotenv` to load configuration locally. Do not hardcode credentials.
-- **Paths:** Use `os.path` or `pathlib` for local file manipulation, but strictly use DBFS/ABFSS paths (`abfss://`) for Spark operations.
-
-### Data Quality & Typing
-- **Pydantic V2:** Use `pydantic` models for configuration and schema validation. Use `model_validate` instead of `parse_obj` (V2 syntax).
-- **Type Hinting:** strictly use `typing` module (e.g., `List`, `Optional`, `Dict`) or modern standard types.
-
-### Performance (PySpark)
-- **NO Loops:** NEVER use Python `for` loops to iterate over DataFrames.
-- **Vectorized UDFs:** If native Spark functions fail, use Pandas UDFs. Avoid standard Python UDFs.
-- **Lazy Evaluation:** Avoid calling `collect()`, `count()`, or `show()` in production transformation functions.
-
-## 4. Project Structure & Patterns
-
-The project follows a standard Python `src` layout.
-
-### Folder Structure
-```text
-root/
-├── databricks.yml        # DABs Configuration
-├── pyproject.toml        # Project metadata & dependencies
-├── src/
-│   └── api_test/         # Main package
-│       ├── __init__.py
-│       ├── main.py       # Entry point
-│       └── modules/      # Logic separated by concern
-└── tests/                # Pytest directory
+## 2. Project Architecture & Context
+- **Execution Mode:** **Local-First**. Code runs locally on your machine using `databricks-connect`, NOT in Notebooks.
+- **Deployment:** Managed via Databricks Asset Bundles (`databricks.yml`).
+- **Dependency Management:** Uses `uv` and `pyproject.toml`.
+- **Structure:**
+  ```text
+  src/
+  └── api_test/           # Main Package
+      ├── main.py         # Entry Point (referenced in pyproject.toml)
+      └── modules/        # Domain logic
 ````
 
-### Spark Session Initialization (Local vs. Prod)
+## 3\. Local Development Rules (Databricks Connect)
 
-**GOOD:**
+### Spark Session Management
+
+Since we run locally, NEVER use the global `spark` variable. Always use this pattern to support both local and remote execution:
 
 ```python
-import os
 from databricks.connect import DatabricksSession
 from pyspark.sql import SparkSession
 
 def get_spark() -> SparkSession:
-    """
-    Returns a DatabricksSession if configured, otherwise falls back to standard SparkSession.
-    """
+    """Gets or creates a Spark session compatible with Databricks Connect."""
     try:
         return DatabricksSession.builder.getOrCreate()
     except Exception:
         return SparkSession.builder.getOrCreate()
 ```
 
-### Configuration Management (Pydantic V2)
+### Environment Variables
 
-**GOOD:**
+  - DO NOT rely on `dbutils.widgets` for configuration.
+  - Use `python-dotenv` to load local `.env` files.
+  - Use **Pydantic V2** (`pydantic_settings`) to validate configurations.
 
-```python
-from pydantic import BaseModel, Field
+### File System & Paths
 
-class JobConfig(BaseModel):
-    input_path: str = Field(..., description="Path to source data")
-    output_table: str = Field(..., description="Target Delta table")
-    write_mode: str = "append"
+  - **Local FS:** Use standard `pathlib` or `os` for local artifacts.
+  - **Distributed FS:** Use `abfss://` paths strictly for Spark operations.
+  - **No Magic Commands:** Never use `%run`, `%sql`, or `%pip`.
 
-# Usage
-config = JobConfig(input_path="abfss://...", output_table="silver.users")
-```
+## 4\. Specific Library Constraints
 
-## 5\. Do's and Don'ts
+### Pydantic V2
 
-### Imports
+We use Pydantic `>2.0`. Enforce V2 syntax:
 
-**BAD:**
+  - **Use:** `model_validate()` instead of `parse_obj()`.
+  - **Use:** `model_dump()` instead of `dict()`.
+  - **Config:** Use `model_config = ConfigDict(...)` instead of `class Config:`.
 
-```python
-from pyspark.sql.functions import * # Pollutes namespace
-import pandas as pd # Only use pandas if strictly necessary, prefer PySpark
-```
+### Databricks Asset Bundles (DABs)
 
-**GOOD:**
+  - **Validation:** When modifying `databricks.yml`, ensure the `bundle.name` matches the directory or project scope.
+  - **Build:** The project builds as a wheel (`uv build --wheel`). Ensure `pyproject.toml` dependencies sync with imports.
 
-```python
-from pyspark.sql import functions as F
-from pyspark.sql import types as T
-from pyspark.sql import DataFrame
-```
+## 5\. Testing Strategy
 
-### Reading Data
-
-**BAD:**
-
-```python
-# Avoid inferSchema in production
-df = spark.read.csv("path", inferSchema=True)
-```
-
-**GOOD:**
-
-```python
-schema = T.StructType([
-    T.StructField("id", T.StringType(), False),
-    T.StructField("created_at", T.TimestampType(), True)
-])
-
-df = spark.read.format("csv").schema(schema).load("abfss://container@storage.dfs.core.windows.net/path")
-```
-
-### Testing
-
-  - Use `pytest`.
-  - For unit tests, use `pyspark.testing.utils.assertDataFrameEqual` or `chispa` to compare DataFrames.
-  - Mock `dbutils` when running locally if secrets are required.
-
-## 6\. Deployment Context
-
-  - This project is deployed using `databricks bundle deploy`.
-  - Build artifacts are generated via `uv build --wheel`.
-  - Ensure all code changes are compatible with the `project.scripts` entry point defined in `pyproject.toml`.
+  - **Framework:** `pytest`.
+  - **Integration:** When testing Spark transformations, use the `get_spark()` session.
+  - **Mocking:** You MUST mock `dbutils` (secrets/fs) when running unit tests locally to avoid connection errors.
