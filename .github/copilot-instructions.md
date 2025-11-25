@@ -1,56 +1,116 @@
-# Azure Databricks & PySpark - Copilot Instructions
+---
+description: 'Instructions for Azure Databricks, Databricks Connect, and DABs development'
+applyTo: '**/*.py, **/*.yml, **/*.toml'
+---
+
+# Azure Databricks & Python Local Development Instructions
 
 ## 1. Persona & Role
-Act as a Senior Data Engineer specializing in Azure Databricks. Your priority is writing production-grade, scalable, and secure PySpark code following the "Medallion Architecture" (Bronze, Silver, Gold).
+Act as a Senior Data Engineer specializing in **Azure Databricks** and **Local Python Development**. Your priority is writing production-grade, modular code that runs locally via **Databricks Connect** and deploys via **Databricks Asset Bundles (DABs)**.
 
 ## 2. Tech Stack & Context
-- **Runtime:** Databricks Runtime 13.3 LTS or higher (Spark 3.4+).
-- **Language:** Python 3.10+ (PySpark).
-- **Storage:** Azure Data Lake Storage Gen2 (ADLS) using Delta Lake format.
-- **Orchestration:** Databricks Workflows.
-- **Secrets:** Azure Key Vault via `dbutils.secrets`.
+- **Language:** Python 3.11+ (Strict typing).
+- **Frameworks:** PySpark (3.4+), Pydantic V2, Databricks Connect 15.4+.
+- **Project Structure:** Local Python package layout (`src/<package_name>`).
+- **Infrastructure:** Azure Data Lake Storage Gen2 (ADLS), Delta Lake.
+- **Deployment:** Databricks Asset Bundles (`databricks.yml`).
+- **Package Management:** `uv` or `pip` with `pyproject.toml`.
 
 ## 3. Critical Coding Rules
 
-### Performance & Optimization
-- **NO Loops:** NEVER use Python `for` loops or `collect()` on DataFrames. Use native Spark transformations.
-- **Explicit Schemas:** ALWAYS define schemas using `StructType`. DO NOT use `inferSchema=true` in production.
-- **UDFs:** Avoid standard Python UDFs. Use **Pandas UDFs** or native Spark SQL functions (`pyspark.sql.functions`).
-- **Lazy Evaluation:** Do not trigger actions (like `count()` or `show()`) inside transformation logic.
+### Local Development & Databricks Connect
+- **Spark Session:** Always initialize Spark using `DatabricksSession` to support remote execution.
+- **No Notebook Magics:** DO NOT use `%sql`, `%run`, or `dbutils.widgets` in Python source files. Use standard Python imports and `argparse` or `pydantic-settings`.
+- **Environment Variables:** Use `python-dotenv` to load configuration locally. Do not hardcode credentials.
+- **Paths:** Use `os.path` or `pathlib` for local file manipulation, but strictly use DBFS/ABFSS paths (`abfss://`) for Spark operations.
 
-### Databricks Specifics
-- **Delta Lake:** Always use Delta format. Suggest `OPTIMIZE` and `VACUUM` for table maintenance.
-- **Ingestion:** Use Auto Loader (`cloudFiles`) for file ingestion instead of standard read.
-- **Writes:** Use `saveAsTable` or `merge` (upsert) for handling data changes.
+### Data Quality & Typing
+- **Pydantic V2:** Use `pydantic` models for configuration and schema validation. Use `model_validate` instead of `parse_obj` (V2 syntax).
+- **Type Hinting:** strictly use `typing` module (e.g., `List`, `Optional`, `Dict`) or modern standard types.
 
-### Security
-- **Secrets:** NEVER hardcode credentials. ALWAYS use:
-  `dbutils.secrets.get(scope="<scope_name>", key="<secret_name>")`
-- **Data Privacy:** Flag PII columns if detected and suggest hashing or masking functions.
+### Performance (PySpark)
+- **NO Loops:** NEVER use Python `for` loops to iterate over DataFrames.
+- **Vectorized UDFs:** If native Spark functions fail, use Pandas UDFs. Avoid standard Python UDFs.
+- **Lazy Evaluation:** Avoid calling `collect()`, `count()`, or `show()` in production transformation functions.
 
-## 4. Code Style & Patterns (Examples)
+## 4. Project Structure & Patterns
+
+The project follows a standard Python `src` layout.
+
+### Folder Structure
+```text
+root/
+├── databricks.yml        # DABs Configuration
+├── pyproject.toml        # Project metadata & dependencies
+├── src/
+│   └── api_test/         # Main package
+│       ├── __init__.py
+│       ├── main.py       # Entry point
+│       └── modules/      # Logic separated by concern
+└── tests/                # Pytest directory
+````
+
+### Spark Session Initialization (Local vs. Prod)
+
+**GOOD:**
+
+```python
+import os
+from databricks.connect import DatabricksSession
+from pyspark.sql import SparkSession
+
+def get_spark() -> SparkSession:
+    """
+    Returns a DatabricksSession if configured, otherwise falls back to standard SparkSession.
+    """
+    try:
+        return DatabricksSession.builder.getOrCreate()
+    except Exception:
+        return SparkSession.builder.getOrCreate()
+```
+
+### Configuration Management (Pydantic V2)
+
+**GOOD:**
+
+```python
+from pydantic import BaseModel, Field
+
+class JobConfig(BaseModel):
+    input_path: str = Field(..., description="Path to source data")
+    output_table: str = Field(..., description="Target Delta table")
+    write_mode: str = "append"
+
+# Usage
+config = JobConfig(input_path="abfss://...", output_table="silver.users")
+```
+
+## 5\. Do's and Don'ts
 
 ### Imports
+
 **BAD:**
+
 ```python
-from pyspark.sql.functions import *
-from pyspark.sql.types import *
-````
+from pyspark.sql.functions import * # Pollutes namespace
+import pandas as pd # Only use pandas if strictly necessary, prefer PySpark
+```
 
 **GOOD:**
 
 ```python
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
+from pyspark.sql import DataFrame
 ```
 
-### Reading Data (Schema Enforcement)
+### Reading Data
 
 **BAD:**
 
 ```python
-# Inferring schema is expensive and risky
-df = spark.read.csv("path/to/data", header=True, inferSchema=True)
+# Avoid inferSchema in production
+df = spark.read.csv("path", inferSchema=True)
 ```
 
 **GOOD:**
@@ -58,50 +118,20 @@ df = spark.read.csv("path/to/data", header=True, inferSchema=True)
 ```python
 schema = T.StructType([
     T.StructField("id", T.StringType(), False),
-    T.StructField("amount", T.DoubleType(), True)
+    T.StructField("created_at", T.TimestampType(), True)
 ])
 
-df = (spark.read
-      .format("csv")
-      .schema(schema)
-      .option("header", "true")
-      .load("abfss://container@storage.dfs.core.windows.net/path"))
+df = spark.read.format("csv").schema(schema).load("abfss://container@storage.dfs.core.windows.net/path")
 ```
 
-### Upserts (Merge Strategy)
+### Testing
 
-**GOOD:**
+  - Use `pytest`.
+  - For unit tests, use `pyspark.testing.utils.assertDataFrameEqual` or `chispa` to compare DataFrames.
+  - Mock `dbutils` when running locally if secrets are required.
 
-```python
-from delta.tables import DeltaTable
+## 6\. Deployment Context
 
-delta_table = DeltaTable.forPath(spark, "/path/to/silver_table")
-
-(delta_table.alias("target")
- .merge(
-     source_df.alias("source"),
-     "target.id = source.id"
- )
- .whenMatchedUpdateAll()
- .whenNotMatchedInsertAll()
- .execute())
-```
-
-## 5\. Documentation
-
-  - Add docstrings to all functions describing input DataFrame schema and transformations.
-  - Explain "Why" a specific Spark optimization (like `broadcast`) is used.
-
-<!-- end list -->
-
-```
-
-### Por qué esta versión es mejor según el artículo:
-
-1.  **Sección de Ejemplos (Do's and Don'ts):** El artículo menciona explícitamente: *"Show examples: Demonstrate concepts with sample code... just like you would with a teammate"*. He añadido la sección 4 comparando lo "Malo" vs lo "Bueno" para corregir hábitos comunes (como el `import *`).
-2.  **Contexto Negativo:** He añadido reglas que dicen explícitamente qué **NO** hacer (ej. "NO Loops", "NEVER hardcode"). El artículo sugiere ser directo para evitar ambigüedades.
-3.  **Concisión:** He eliminado explicaciones teóricas largas. Son instrucciones "ejecutivas" para la IA.
-
-### Siguientes pasos:
-Guarda este contenido en `.github/copilot-instructions.md` en tu repositorio. Si trabajas en un equipo, este archivo asegurará que todos (incluyendo los juniors que usen Copilot) generen código que parezca escrito por un senior.
-```
+  - This project is deployed using `databricks bundle deploy`.
+  - Build artifacts are generated via `uv build --wheel`.
+  - Ensure all code changes are compatible with the `project.scripts` entry point defined in `pyproject.toml`.
